@@ -74,6 +74,92 @@ jobs:
           # Use clang++, because it is a bit faster and uses less memory than g++
           git rebase --exec "echo Running test-one-commit on \$( git log -1 ) && ./autogen.sh && CC=clang CXX=clang++ ./configure --with-incompatible-bdb && make clean && make -j $(nproc) check && ./test/functional/test_runner.py -j $(( $(nproc) * 2 ))" ${{ env.TEST_BASE }}
 
+  raspberry-pi-cross:
+    name: "Raspberry Pi cross-compile (${{ matrix.name }})"
+    runs-on: ubuntu-24.04
+    if: github.repository != 'bitcoin-core/gui' || github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        host: [aarch64-linux-gnu, arm-linux-gnueabihf]
+        include:
+          - host: aarch64-linux-gnu
+            name: "arm64 (Pi 3/4/5, 64-bit)"
+            pkgs: "gcc-aarch64-linux-gnu g++-aarch64-linux-gnu"
+            artifact: "bitcoin-arm64"
+          - host: arm-linux-gnueabihf
+            name: "armhf (Pi 2/3, 32-bit)"
+            pkgs: "gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf"
+            artifact: "bitcoin-armhf"
+    env:
+      BASE_ROOT_DIR: ${{ github.workspace }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential libtool autotools-dev automake pkg-config ccache bsdmainutils python3 curl zip \
+            ${{ matrix.pkgs }}
+
+      - name: Set Ccache directory
+        run: echo "CCACHE_DIR=${RUNNER_TEMP}/ccache_dir" >> "$GITHUB_ENV"
+
+      - name: Restore Ccache cache
+        id: ccache-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ github.job }}-${{ matrix.host }}-ccache-${{ github.run_id }}
+          restore-keys: ${{ github.job }}-${{ matrix.host }}-ccache-
+
+      - name: Build depends (no Qt)
+        env:
+          MAKEJOBS: '-j10'
+        run: |
+          make -C depends HOST=${{ matrix.host }} NO_QT=1 $MAKEJOBS
+
+      - name: Configure (cross)
+        env:
+          CC:  ${{ matrix.host }}-gcc
+          CXX: ${{ matrix.host }}-g++
+        run: |
+          ./autogen.sh
+          CONFIG_SITE=$PWD/depends/${{ matrix.host }}/share/config.site \
+          ./configure \
+            --prefix=$PWD/depends/${{ matrix.host }} \
+            --with-incompatible-bdb \
+            --without-gui \
+            --disable-tests
+
+      - name: Build
+        env:
+          MAKEJOBS: '-j10'
+        run: make $MAKEJOBS
+
+      - name: Package artifacts
+        run: |
+          outdir="${{ matrix.artifact }}"
+          mkdir -p "$outdir"
+          cp -v src/lyncoind src/lyncoin-cli src/lyncoin-tx "$outdir" || true
+          tar czf "${outdir}.tar.gz" "$outdir"
+          echo "ARTIFACT=${outdir}.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ env.ARTIFACT }}
+
+      - name: Save Ccache cache
+        uses: actions/cache/save@v4
+        if: github.event_name != 'pull_request' && steps.ccache-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ github.job }}-${{ matrix.host }}-ccache-${{ github.run_id }}
+
   macos-native-x86_64:
     name: 'macOS 13 native, x86_64, no depends, sqlite only, gui'
     # Use latest image, but hardcode version to avoid silent upgrades (and breaks).
